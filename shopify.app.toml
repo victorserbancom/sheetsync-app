@@ -1,0 +1,21 @@
+name = "SheetSync"
+client_id = "22a83145fbdc6edbfdd9e16a7894f312"
+application_url = "https://sheetsync-pearl.vercel.app/"
+embedded = false
+
+[access_scopes]
+scopes = "read_orders,read_reports"
+
+[auth]
+redirect_urls = [
+  "https://sheetsync-pearl.vercel.app/auth/callback",
+  "http://localhost:3000/callback"
+]
+
+[webhooks]
+api_version = "2026-01"
+
+[webhooks.privacy_compliance]
+customer_data_request_url = "https://sheetsync-pearl.vercel.app/webhooks/customers/data_request"
+customer_deletion_url = "https://sheetsync-pearl.vercel.app/webhooks/customers/redact"
+shop_deletion_url = "https://sheetsync-pearl.vercel.app/webhooks/shop/redact"

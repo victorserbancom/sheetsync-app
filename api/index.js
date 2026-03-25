@@ -1,32 +1,68 @@
 const crypto = require('crypto');
 
 const CLIENT_ID = '22a83145fbdc6edbfdd9e16a7894f312';
+const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
 const SCOPES = 'read_orders,read_reports';
 
-module.exports = (req, res) => {
+module.exports = async (req, res) => {
   const url = new URL(req.url, `https://${req.headers.host}`);
   const path = url.pathname;
 
   // GDPR Compliance Webhooks (mandatory for Shopify apps)
-  if (path === '/webhooks/customers/data_request' && req.method === 'POST') {
-    return res.status(200).json({ message: 'No customer data stored' });
-  }
+  if (req.method === 'POST' && (
+    path === '/webhooks/customers/data_request' ||
+    path === '/webhooks/customers/redact' ||
+    path === '/webhooks/shop/redact'
+  )) {
+    // Verify HMAC signature
+    const rawBody = await getRawBody(req);
+    const hmac = req.headers['x-shopify-hmac-sha256'];
 
-  if (path === '/webhooks/customers/redact' && req.method === 'POST') {
-    return res.status(200).json({ message: 'No customer data to delete' });
-  }
+    if (!hmac || !CLIENT_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
 
-  if (path === '/webhooks/shop/redact' && req.method === 'POST') {
-    return res.status(200).json({ message: 'No shop data to delete' });
+    const computed = crypto
+      .createHmac('sha256', CLIENT_SECRET)
+      .update(rawBody)
+      .digest('base64');
+
+    if (!safeCompare(computed, hmac)) {
+      return res.status(401).json({ error: 'Invalid HMAC signature' });
+    }
+
+    return res.status(200).json({ message: 'OK' });
   }
 
   // OAuth callback - after merchant approves, Shopify redirects here with code
   if (path === '/auth/callback') {
     const code = url.searchParams.get('code');
     const shop = url.searchParams.get('shop');
+    const hmac = url.searchParams.get('hmac');
 
     if (!code || !shop) {
       return res.status(400).send(page('Error', 'Missing authorization code or shop parameter.'));
+    }
+
+    // Verify HMAC on callback query params
+    if (CLIENT_SECRET && hmac) {
+      const params = new URLSearchParams(url.search);
+      params.delete('hmac');
+      params.sort();
+      const message = params.toString();
+      const computed = crypto
+        .createHmac('sha256', CLIENT_SECRET)
+        .update(message)
+        .digest('hex');
+
+      if (!safeCompare(computed, hmac)) {
+        return res.status(400).send(page('Error', 'Invalid signature. Please try installing again.'));
+      }
+    }
+
+    // Validate shop domain format
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop)) {
+      return res.status(400).send(page('Error', 'Invalid shop domain.'));
     }
 
     // Show success page with the auth code for CLI token exchange
@@ -41,9 +77,13 @@ module.exports = (req, res) => {
 
   // Shopify sends merchants here after they click "Install" from the App Store.
   // We must redirect them to the Shopify OAuth authorize page.
-  // Shopify passes ?shop=xxx.myshopify.com as a query param.
   const shop = url.searchParams.get('shop');
   if (shop) {
+    // Validate shop domain format
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop)) {
+      return res.status(400).send(page('Error', 'Invalid shop domain.'));
+    }
+
     const redirectUri = `https://${req.headers.host}/auth/callback`;
     const nonce = crypto.randomBytes(16).toString('hex');
     const authUrl = `https://${shop}/admin/oauth/authorize?client_id=${CLIENT_ID}&scope=${SCOPES}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${nonce}`;
@@ -51,7 +91,7 @@ module.exports = (req, res) => {
     return res.end();
   }
 
-  // App home page (no shop param, just visiting the URL directly)
+  // App home page
   if (path === '/' || path === '') {
     return res.status(200).send(page(
       'SheetSync',
@@ -75,6 +115,22 @@ module.exports = (req, res) => {
 
   return res.status(404).send(page('Not Found', '<p>Page not found.</p>'));
 };
+
+// Disable Vercel's automatic body parsing so we can read raw body for HMAC
+module.exports.config = { api: { bodyParser: false } };
+
+function getRawBody(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+}
+
+function safeCompare(a, b) {
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeCompare(Buffer.from(a), Buffer.from(b));
+}
 
 function escapeHtml(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
