@@ -1,48 +1,57 @@
 const crypto = require('crypto');
 
+const CLIENT_ID = '22a83145fbdc6edbfdd9e16a7894f312';
+const SCOPES = 'read_orders,read_reports';
+
 module.exports = (req, res) => {
   const url = new URL(req.url, `https://${req.headers.host}`);
   const path = url.pathname;
 
   // GDPR Compliance Webhooks (mandatory for Shopify apps)
-  // These return 200 OK as SheetSync doesn't store any customer data
-
   if (path === '/webhooks/customers/data_request' && req.method === 'POST') {
-    // Customer data request - we don't store customer data
     return res.status(200).json({ message: 'No customer data stored' });
   }
 
   if (path === '/webhooks/customers/redact' && req.method === 'POST') {
-    // Customer data deletion - we don't store customer data
     return res.status(200).json({ message: 'No customer data to delete' });
   }
 
   if (path === '/webhooks/shop/redact' && req.method === 'POST') {
-    // Shop data deletion - we don't store shop data
     return res.status(200).json({ message: 'No shop data to delete' });
   }
 
-  // OAuth callback - handles the auth redirect after install
+  // OAuth callback - after merchant approves, Shopify redirects here with code
   if (path === '/auth/callback') {
     const code = url.searchParams.get('code');
     const shop = url.searchParams.get('shop');
-    const hmac = url.searchParams.get('hmac');
 
     if (!code || !shop) {
       return res.status(400).send(page('Error', 'Missing authorization code or shop parameter.'));
     }
 
+    // Show success page with the auth code for CLI token exchange
     return res.status(200).send(page(
       'SheetSync Installed Successfully',
       `<p>SheetSync has been installed on <strong>${escapeHtml(shop)}</strong>.</p>
-       <p>To complete setup, run this command in your terminal:</p>
+       <p>To complete setup and get your access token, run this command in your terminal:</p>
        <pre>node shopify-oauth.js ${escapeHtml(shop)} &lt;client-id&gt; &lt;client-secret&gt;</pre>
-       <p>This will exchange the authorization for a permanent access token.</p>
-       <p>See the <a href="https://github.com/verygoodads/sheetsync">documentation</a> for full setup instructions.</p>`
+       <p>For full setup instructions, visit the <a href="https://github.com/victorserbancom/sheetsync-app">documentation</a>.</p>`
     ));
   }
 
-  // App home page - shown after install or when visiting the app URL
+  // Shopify sends merchants here after they click "Install" from the App Store.
+  // We must redirect them to the Shopify OAuth authorize page.
+  // Shopify passes ?shop=xxx.myshopify.com as a query param.
+  const shop = url.searchParams.get('shop');
+  if (shop) {
+    const redirectUri = `https://${req.headers.host}/auth/callback`;
+    const nonce = crypto.randomBytes(16).toString('hex');
+    const authUrl = `https://${shop}/admin/oauth/authorize?client_id=${CLIENT_ID}&scope=${SCOPES}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${nonce}`;
+    res.writeHead(302, { Location: authUrl });
+    return res.end();
+  }
+
+  // App home page (no shop param, just visiting the URL directly)
   if (path === '/' || path === '') {
     return res.status(200).send(page(
       'SheetSync',
@@ -60,11 +69,10 @@ module.exports = (req, res) => {
          <li>Run the CLI tool to authorize and get your access token</li>
          <li>Export data to your Google Sheet with one command</li>
        </ol>
-       <p>For setup instructions, visit the <a href="https://github.com/verygoodads/sheetsync">documentation</a>.</p>`
+       <p>For setup instructions, visit the <a href="https://github.com/victorserbancom/sheetsync-app">documentation</a>.</p>`
     ));
   }
 
-  // 404 for everything else
   return res.status(404).send(page('Not Found', '<p>Page not found.</p>'));
 };
 
