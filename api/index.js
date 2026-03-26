@@ -4,134 +4,135 @@ const CLIENT_ID = '22a83145fbdc6edbfdd9e16a7894f312';
 const SCOPES = 'read_orders,read_reports';
 
 module.exports = async (req, res) => {
-  const url = new URL(req.url, `https://${req.headers.host}`);
-  const path = url.pathname;
+  try {
+    const url = new URL(req.url, `https://${req.headers.host}`);
+    const path = url.pathname;
 
-  // GDPR Compliance Webhooks (mandatory for Shopify apps)
-  if (req.method === 'POST' && (
-    path === '/webhooks/customers/data_request' ||
-    path === '/webhooks/customers/redact' ||
-    path === '/webhooks/shop/redact'
-  )) {
-    const secret = process.env.SHOPIFY_CLIENT_SECRET;
-    const rawBody = await getRawBody(req);
-    const hmac = req.headers['x-shopify-hmac-sha256'];
+    // GDPR Compliance Webhooks (mandatory for Shopify apps)
+    if (req.method === 'POST' && (
+      path === '/webhooks/customers/data_request' ||
+      path === '/webhooks/customers/redact' ||
+      path === '/webhooks/shop/redact'
+    )) {
+      const secret = process.env.SHOPIFY_CLIENT_SECRET;
+      const hmac = req.headers['x-shopify-hmac-sha256'];
 
-    // Must have both secret configured and HMAC header present
-    if (!secret || !hmac) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const computed = crypto
-      .createHmac('sha256', secret)
-      .update(rawBody)
-      .digest('base64');
-
-    if (!safeCompare(computed, hmac)) {
-      return res.status(401).json({ error: 'Invalid HMAC signature' });
-    }
-
-    return res.status(200).json({ message: 'OK' });
-  }
-
-  // OAuth callback - after merchant approves, Shopify redirects here with code
-  if (path === '/auth/callback') {
-    const code = url.searchParams.get('code');
-    const shop = url.searchParams.get('shop');
-    const hmac = url.searchParams.get('hmac');
-
-    if (!code || !shop) {
-      return res.status(400).send(page('Error', 'Missing authorization code or shop parameter.'));
-    }
-
-    // Verify HMAC on callback query params
-    const cbSecret = process.env.SHOPIFY_CLIENT_SECRET;
-    if (cbSecret && hmac) {
-      const params = new URLSearchParams(url.search);
-      params.delete('hmac');
-      params.sort();
-      const message = params.toString();
-      const computed = crypto
-        .createHmac('sha256', cbSecret)
-        .update(message)
-        .digest('hex');
-
-      if (!safeCompare(computed, hmac)) {
-        return res.status(400).send(page('Error', 'Invalid signature. Please try installing again.'));
+      // Must have both secret configured and HMAC header present
+      if (!secret || !hmac) {
+        return res.status(401).json({ error: 'Unauthorized' });
       }
+
+      // Read raw body for HMAC verification
+      const rawBody = await new Promise((resolve, reject) => {
+        const chunks = [];
+        req.on('data', (chunk) => chunks.push(chunk));
+        req.on('end', () => resolve(Buffer.concat(chunks)));
+        req.on('error', reject);
+      });
+
+      const computed = crypto
+        .createHmac('sha256', secret)
+        .update(rawBody)
+        .digest('base64');
+
+      // Timing-safe comparison
+      const a = Buffer.from(computed);
+      const b = Buffer.from(hmac);
+      if (a.length !== b.length || !crypto.timingSafeCompare(a, b)) {
+        return res.status(401).json({ error: 'Invalid HMAC signature' });
+      }
+
+      return res.status(200).json({ message: 'OK' });
     }
 
-    // Validate shop domain format
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop)) {
-      return res.status(400).send(page('Error', 'Invalid shop domain.'));
+    // OAuth callback
+    if (path === '/auth/callback') {
+      const code = url.searchParams.get('code');
+      const shop = url.searchParams.get('shop');
+      const hmac = url.searchParams.get('hmac');
+
+      if (!code || !shop) {
+        return res.status(400).send(page('Error', 'Missing authorization code or shop parameter.'));
+      }
+
+      // Verify HMAC on callback query params
+      const cbSecret = process.env.SHOPIFY_CLIENT_SECRET;
+      if (cbSecret && hmac) {
+        const params = new URLSearchParams(url.search);
+        params.delete('hmac');
+        params.sort();
+        const message = params.toString();
+        const computed = crypto
+          .createHmac('sha256', cbSecret)
+          .update(message)
+          .digest('hex');
+
+        const a = Buffer.from(computed);
+        const b = Buffer.from(hmac);
+        if (a.length !== b.length || !crypto.timingSafeCompare(a, b)) {
+          return res.status(400).send(page('Error', 'Invalid signature. Please try installing again.'));
+        }
+      }
+
+      // Validate shop domain format
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop)) {
+        return res.status(400).send(page('Error', 'Invalid shop domain.'));
+      }
+
+      return res.status(200).send(page(
+        'SheetSync Installed Successfully',
+        `<p>SheetSync has been installed on <strong>${escapeHtml(shop)}</strong>.</p>
+         <p>To complete setup and get your access token, run this command in your terminal:</p>
+         <pre>node shopify-oauth.js ${escapeHtml(shop)} &lt;client-id&gt; &lt;client-secret&gt;</pre>
+         <p>For full setup instructions, visit the <a href="https://github.com/victorserbancom/sheetsync-app">documentation</a>.</p>`
+      ));
     }
 
-    // Show success page with the auth code for CLI token exchange
-    return res.status(200).send(page(
-      'SheetSync Installed Successfully',
-      `<p>SheetSync has been installed on <strong>${escapeHtml(shop)}</strong>.</p>
-       <p>To complete setup and get your access token, run this command in your terminal:</p>
-       <pre>node shopify-oauth.js ${escapeHtml(shop)} &lt;client-id&gt; &lt;client-secret&gt;</pre>
-       <p>For full setup instructions, visit the <a href="https://github.com/victorserbancom/sheetsync-app">documentation</a>.</p>`
-    ));
-  }
+    // Shopify install redirect
+    const shop = url.searchParams.get('shop');
+    if (shop) {
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop)) {
+        return res.status(400).send(page('Error', 'Invalid shop domain.'));
+      }
 
-  // Shopify sends merchants here after they click "Install" from the App Store.
-  // We must redirect them to the Shopify OAuth authorize page.
-  const shop = url.searchParams.get('shop');
-  if (shop) {
-    // Validate shop domain format
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop)) {
-      return res.status(400).send(page('Error', 'Invalid shop domain.'));
+      const redirectUri = `https://${req.headers.host}/auth/callback`;
+      const nonce = crypto.randomBytes(16).toString('hex');
+      const authUrl = `https://${shop}/admin/oauth/authorize?client_id=${CLIENT_ID}&scope=${SCOPES}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${nonce}`;
+      res.writeHead(302, { Location: authUrl });
+      return res.end();
     }
 
-    const redirectUri = `https://${req.headers.host}/auth/callback`;
-    const nonce = crypto.randomBytes(16).toString('hex');
-    const authUrl = `https://${shop}/admin/oauth/authorize?client_id=${CLIENT_ID}&scope=${SCOPES}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${nonce}`;
-    res.writeHead(302, { Location: authUrl });
-    return res.end();
-  }
+    // App home page
+    if (path === '/' || path === '') {
+      return res.status(200).send(page(
+        'SheetSync',
+        `<p>SheetSync exports your Shopify sales data to Google Sheets.</p>
+         <h2>Features</h2>
+         <ul>
+           <li>Monthly revenue breakdowns matching Shopify Analytics exactly</li>
+           <li>Orders, gross sales, discounts, returns, net sales, shipping, taxes, total sales</li>
+           <li>Automatic Google Sheets integration</li>
+           <li>Current month partial data with day count labels</li>
+         </ul>
+         <h2>Getting Started</h2>
+         <ol>
+           <li>Install SheetSync on your Shopify store</li>
+           <li>Run the CLI tool to authorize and get your access token</li>
+           <li>Export data to your Google Sheet with one command</li>
+         </ol>
+         <p>For setup instructions, visit the <a href="https://github.com/victorserbancom/sheetsync-app">documentation</a>.</p>`
+      ));
+    }
 
-  // App home page
-  if (path === '/' || path === '') {
-    return res.status(200).send(page(
-      'SheetSync',
-      `<p>SheetSync exports your Shopify sales data to Google Sheets.</p>
-       <h2>Features</h2>
-       <ul>
-         <li>Monthly revenue breakdowns matching Shopify Analytics exactly</li>
-         <li>Orders, gross sales, discounts, returns, net sales, shipping, taxes, total sales</li>
-         <li>Automatic Google Sheets integration</li>
-         <li>Current month partial data with day count labels</li>
-       </ul>
-       <h2>Getting Started</h2>
-       <ol>
-         <li>Install SheetSync on your Shopify store</li>
-         <li>Run the CLI tool to authorize and get your access token</li>
-         <li>Export data to your Google Sheet with one command</li>
-       </ol>
-       <p>For setup instructions, visit the <a href="https://github.com/victorserbancom/sheetsync-app">documentation</a>.</p>`
-    ));
+    return res.status(404).send(page('Not Found', '<p>Page not found.</p>'));
+  } catch (err) {
+    console.error('Server error:', err);
+    return res.status(401).json({ error: 'Unauthorized' });
   }
-
-  return res.status(404).send(page('Not Found', '<p>Page not found.</p>'));
 };
 
 // Disable Vercel's automatic body parsing so we can read raw body for HMAC
 module.exports.config = { api: { bodyParser: false } };
-
-function getRawBody(req) {
-  return new Promise((resolve) => {
-    const chunks = [];
-    req.on('data', (chunk) => chunks.push(chunk));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-  });
-}
-
-function safeCompare(a, b) {
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeCompare(Buffer.from(a), Buffer.from(b));
-}
 
 function escapeHtml(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
