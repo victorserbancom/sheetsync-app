@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 
 const CLIENT_ID = '22a83145fbdc6edbfdd9e16a7894f312';
-const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
 const SCOPES = 'read_orders,read_reports';
 
 module.exports = async (req, res) => {
@@ -14,16 +13,17 @@ module.exports = async (req, res) => {
     path === '/webhooks/customers/redact' ||
     path === '/webhooks/shop/redact'
   )) {
-    // Verify HMAC signature
+    const secret = process.env.SHOPIFY_CLIENT_SECRET;
     const rawBody = await getRawBody(req);
     const hmac = req.headers['x-shopify-hmac-sha256'];
 
-    if (!hmac || !CLIENT_SECRET) {
+    // Must have both secret configured and HMAC header present
+    if (!secret || !hmac) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
     const computed = crypto
-      .createHmac('sha256', CLIENT_SECRET)
+      .createHmac('sha256', secret)
       .update(rawBody)
       .digest('base64');
 
@@ -45,13 +45,14 @@ module.exports = async (req, res) => {
     }
 
     // Verify HMAC on callback query params
-    if (CLIENT_SECRET && hmac) {
+    const cbSecret = process.env.SHOPIFY_CLIENT_SECRET;
+    if (cbSecret && hmac) {
       const params = new URLSearchParams(url.search);
       params.delete('hmac');
       params.sort();
       const message = params.toString();
       const computed = crypto
-        .createHmac('sha256', CLIENT_SECRET)
+        .createHmac('sha256', cbSecret)
         .update(message)
         .digest('hex');
 
